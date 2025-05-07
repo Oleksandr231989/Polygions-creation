@@ -54,6 +54,39 @@ def extract_coordinates_from_kml(kml_content):
     
     return territories
 
+def debug_territory_matching(territories, lat, lng):
+    """
+    Helper function to debug if a point falls within any territory
+    """
+    point = Point(lng, lat)
+    matches = []
+    
+    for name, polygon in territories.items():
+        try:
+            if polygon.contains(point):
+                matches.append(name)
+        except Exception as e:
+            st.error(f"Error checking {name}: {str(e)}")
+    
+    if matches:
+        st.success(f"Point ({lat}, {lng}) falls within territories: {', '.join(matches)}")
+    else:
+        st.warning(f"Point ({lat}, {lng}) does not fall within any territory")
+        
+    # Debug visualization of the point
+    st.write(f"Point coordinates: {point.wkt}")
+    
+    # For any territory that's close but not containing the point, show the distance
+    st.write("Distance to territory boundaries:")
+    for name, polygon in territories.items():
+        try:
+            distance = point.distance(polygon.boundary)
+            st.write(f"• {name}: {distance:.6f} degrees")
+        except Exception as e:
+            st.write(f"• {name}: Error calculating distance - {str(e)}")
+    
+    return matches
+
 def main():
     st.set_page_config(page_title="Territory Analyzer", page_icon="🗺️", layout="wide")
     
@@ -132,6 +165,16 @@ def main():
                 lat_column = st.selectbox("Select Latitude Column", columns)
                 lng_column = st.selectbox("Select Longitude Column", columns)
             
+            # Add debug section for testing specific coordinates
+            with st.expander("Debug Territory Matching"):
+                st.write("Use this tool to check if specific coordinates fall within any territory")
+                test_lat = st.number_input("Test Latitude", value=50.5126704)
+                test_lng = st.number_input("Test Longitude", value=30.4267758)
+                debug_button = st.button("Test These Coordinates")
+
+                if debug_button and territories:
+                    debug_territory_matching(territories, test_lat, test_lng)
+            
             # Process button (only active if territories are loaded)
             process_button = st.button("Analyze Territories", disabled=len(territories) == 0)
             
@@ -147,22 +190,64 @@ def main():
                     # Determine territory for each point
                     territory_results = []
                     
-                    for _, row in df.iterrows():
+                    # Create a progress bar for visual feedback
+                    progress_bar = st.progress(0)
+                    total_rows = len(df)
+                    
+                    # For debugging purpose, count addresses in territories
+                    territory_match_count = {name: 0 for name in territories.keys()}
+                    territory_match_count["Outside territory"] = 0
+                    
+                    # Store details about which addresses didn't match any territory
+                    unmatched_addresses = []
+                    
+                    for idx, row in df.iterrows():
+                        # Update progress bar
+                        if idx % 100 == 0:
+                            progress_bar.progress(min(idx / total_rows, 1.0))
+                            
                         lat = row[lat_column]
                         lng = row[lng_column]
                         
                         if pd.notnull(lat) and pd.notnull(lng):
                             point = Point(lng, lat)
-                            matched_territory = None
+                            matched_territories = []
                             
+                            # Check all territories without breaking on first match
                             for name, polygon in territories.items():
-                                if polygon.contains(point):
-                                    matched_territory = name
-                                    break
+                                try:
+                                    if polygon.contains(point):
+                                        matched_territories.append(name)
+                                except Exception as e:
+                                    st.warning(f"Error checking if point is in territory {name}: {str(e)}")
                             
-                            territory_results.append(matched_territory)
+                            # If we found any territories, use the first one
+                            # This could be modified to use a priority system if needed
+                            if matched_territories:
+                                # Prioritize Шелухін 7 if it's in the matches
+                                if "Шелухін 7" in matched_territories:
+                                    matched_territory = "Шелухін 7"
+                                else:
+                                    matched_territory = matched_territories[0]
+                                territory_match_count[matched_territory] += 1
+                            else:
+                                matched_territory = None
+                                territory_match_count["Outside territory"] += 1
+                                # Store information about unmatched address for debugging
+                                if len(unmatched_addresses) < 100:  # Limit to 100 examples
+                                    unmatched_addresses.append({
+                                        'address': row.get('Address new', 'Unknown'),
+                                        'lat': lat,
+                                        'lng': lng
+                                    })
                         else:
-                            territory_results.append(None)
+                            matched_territory = None
+                            territory_match_count["Outside territory"] += 1
+                        
+                        territory_results.append(matched_territory)
+                    
+                    # Complete the progress bar
+                    progress_bar.progress(1.0)
                     
                     # Add territory column to dataframe
                     df['territory'] = territory_results
@@ -204,6 +289,36 @@ def main():
                         
                         total = territory_counts['Count'].sum()
                         st.write(f"**Total: {total} locations**")
+                    
+                    # Debug information about potentially problematic polygons
+                    st.subheader("Debug Information")
+                    st.write("This information can help identify issues with territory matching:")
+                    
+                    # Show territories with no matches
+                    empty_territories = [name for name, count in territory_match_count.items() 
+                                        if count == 0 and name != "Outside territory"]
+                    if empty_territories:
+                        st.warning(f"Territories with no matching addresses: {', '.join(empty_territories)}")
+                    
+                    # Show information about unmatched addresses
+                    if unmatched_addresses:
+                        expander = st.expander("Sample of unmatched addresses")
+                        with expander:
+                            st.write(f"Total unmatched addresses: {territory_match_count['Outside territory']}")
+                            st.write("Sample of addresses that didn't match any territory:")
+                            for addr in unmatched_addresses[:10]:  # Show just the first 10
+                                st.write(f"• {addr['address']} ({addr['lat']}, {addr['lng']})")
+                            
+                            # Suggest checking these coordinates against the territories
+                            st.write("\nTo check if a specific point is within any territory, copy these coordinates:")
+                            sample_point = unmatched_addresses[0]
+                            st.code(f"point = Point({sample_point['lng']}, {sample_point['lat']})")
+                            st.write("Then check against each territory:")
+                            st.code("""
+for name, polygon in territories.items():
+    if polygon.contains(point):
+        print(f"Point is in {name}")
+                            """)
         
         except Exception as e:
             st.error(f"Error processing the Excel file: {str(e)}")
