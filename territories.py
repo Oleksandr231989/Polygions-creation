@@ -246,177 +246,6 @@ def get_territory_name_mapping(kml_territories, excel_territories):
     
     return mapping
 
-def debug_specific_polygon(territories, polygon_name, test_addresses):
-    """
-    Special debugging function for a specific polygon and set of addresses
-    """
-    if polygon_name not in territories:
-        st.error(f"Polygon '{polygon_name}' not found in territories!")
-        variant_names = [name for name in territories.keys() if polygon_name.lower() in name.lower()]
-        if variant_names:
-            st.info(f"Found similar names: {', '.join(variant_names)}")
-        return
-        
-    polygon = territories[polygon_name]
-    st.success(f"Found polygon: {polygon_name}")
-    
-    # Display polygon properties
-    bounds = polygon.bounds
-    st.write(f"Bounds: min_lng={bounds[0]:.6f}, min_lat={bounds[1]:.6f}, max_lng={bounds[2]:.6f}, max_lat={bounds[3]:.6f}")
-    st.write(f"Area: {polygon.area:.8f} square degrees")
-    st.write(f"Valid geometry: {polygon.is_valid}")
-    
-    # Test each address
-    st.subheader("Testing addresses")
-    for address in test_addresses:
-        lat = address["lat"]
-        lng = address["lng"]
-        name = address["name"]
-        
-        point = Point(lng, lat)
-        direct_match = polygon.contains(point)
-        
-        st.write(f"**{name}**: ({lat}, {lng})")
-        st.write(f"Direct containment (no buffer): {'✅ Inside' if direct_match else '❌ Outside'}")
-        
-        # Test with increasing buffer sizes
-        st.write("Testing with different buffer sizes:")
-        for buffer in [1e-10, 1e-8, 1e-6, 1e-5, 1e-4, 1e-3]:
-            buffered_match = contains_with_buffer(polygon, point, buffer_distance=buffer)
-            st.write(f"  Buffer {buffer}: {'✅ Inside' if buffered_match else '❌ Outside'}")
-            
-        # Distance to polygon
-        distance = polygon.distance(point)
-        st.write(f"Distance to polygon boundary: {distance*111000:.2f} meters")
-        st.write("---")
-    
-    # Create visualization
-    st.subheader("Visualization")
-    # Convert polygon to GeoJSON
-    polygon_geojson = json.dumps({
-        "type": "FeatureCollection",
-        "features": [
-            {
-                "type": "Feature",
-                "properties": {"name": polygon_name},
-                "geometry": mapping(polygon)
-            }
-        ]
-    })
-    
-    # Convert addresses to GeoJSON
-    points_geojson = json.dumps({
-        "type": "FeatureCollection",
-        "features": [
-            {
-                "type": "Feature",
-                "properties": {"name": addr["name"]},
-                "geometry": {
-                    "type": "Point",
-                    "coordinates": [addr["lng"], addr["lat"]]
-                }
-            } for addr in test_addresses
-        ]
-    })
-    
-    # Create map
-    m_width = 700
-    m_height = 500
-    
-    components.html(
-        f"""
-        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
-        <div id="debug_map" style="height: {m_height}px; width: {m_width}px;"></div>
-        <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
-        <script>
-            var map = L.map('debug_map').setView([{test_addresses[0]['lat']}, {test_addresses[0]['lng']}], 14);
-            
-            L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-            }}).addTo(map);
-            
-            // Add the polygon
-            var polygon = {polygon_geojson};
-            
-            L.geoJSON(polygon, {{
-                style: function(feature) {{
-                    return {{
-                        color: "#FF0000",
-                        weight: 3,
-                        opacity: 0.7,
-                        fillOpacity: 0.3
-                    }};
-                }},
-                onEachFeature: function(feature, layer) {{
-                    if (feature.properties && feature.properties.name) {{
-                        layer.bindPopup(feature.properties.name);
-                    }}
-                }}
-            }}).addTo(map);
-            
-            // Add the points
-            var points = {points_geojson};
-            
-            L.geoJSON(points, {{
-                pointToLayer: function(feature, latlng) {{
-                    return L.circleMarker(latlng, {{
-                        radius: 8,
-                        fillColor: "#0000FF",
-                        color: "#000",
-                        weight: 1,
-                        opacity: 1,
-                        fillOpacity: 0.8
-                    }});
-                }},
-                onEachFeature: function(feature, layer) {{
-                    if (feature.properties && feature.properties.name) {{
-                        layer.bindPopup(feature.properties.name);
-                    }}
-                }}
-            }}).addTo(map);
-            
-            // Fit bounds to include both polygon and points
-            var bounds = L.geoJSON(polygon).getBounds();
-            map.fitBounds(bounds);
-        </script>
-        """,
-        height=m_height,
-        width=m_width,
-    )
-
-def debug_territory_matching(territories, lat, lng):
-    """
-    Helper function to debug if a point falls within any territory
-    """
-    point = Point(lng, lat)
-    matches = []
-    
-    for name, polygon in territories.items():
-        try:
-            if contains_with_buffer(polygon, point):
-                matches.append(name)
-        except Exception as e:
-            st.error(f"Error checking {name}: {str(e)}")
-    
-    if matches:
-        st.success(f"Point ({lat}, {lng}) falls within territories: {', '.join(matches)}")
-    else:
-        st.warning(f"Point ({lat}, {lng}) does not fall within any territory")
-        
-    # Debug visualization of the point
-    st.write(f"Point coordinates: {point.wkt}")
-    
-    # For any territory that's close but not containing the point, show the distance
-    st.write("Distance to territory boundaries:")
-    for name, polygon in territories.items():
-        try:
-            distance = point.distance(polygon.boundary)
-            st.write(f"• {name}: {distance:.8f} degrees (approx. {distance*111000:.2f} meters)")
-        except Exception as e:
-            st.write(f"• {name}: Error calculating distance - {str(e)}")
-    
-    return matches
-
 def analyze_territory_names(territories):
     """
     Analyze territory names for potential issues
@@ -449,7 +278,7 @@ def analyze_territory_names(territories):
         st.success("No territory names with whitespace or case conflicts found")
     
     # Look for name patterns in problem territories
-    problem_territories = ["Павленко-Соболєв Є.Г.", "Лихачева А 3", "Гресь 3", "Шелухін 8", "Гресь 4", "Гресь десн"]
+    problem_territories = ["Павленко-Соболєв Є.Г.", "Лихачева А 3", "Гресь 3", "Шелухін 8", "Гресь 4"]
     
     st.write("Checking for problem territory name patterns:")
     for problem in problem_territories:
@@ -475,225 +304,10 @@ def analyze_territory_names(territories):
         if not found:
             st.error(f"• '{problem}' - No match or similar name found in KML territories")
 
-def fix_polygon_coordinates(territories, territory_name, coordinate_offset=(0, 0)):
-    """
-    Apply a coordinate offset to fix polygon coordinates
-    """
-    if territory_name not in territories:
-        st.error(f"Territory '{territory_name}' not found")
-        return territories, False
-    
-    try:
-        polygon = territories[territory_name]
-        lng_offset, lat_offset = coordinate_offset
-        
-        # Get coordinates, apply offset, create new polygon
-        coords = list(polygon.exterior.coords)
-        new_coords = [(x + lng_offset, y + lat_offset) for x, y in coords]
-        
-        new_polygon = Polygon(new_coords)
-        if not new_polygon.is_valid:
-            new_polygon = new_polygon.buffer(0)  # Try to fix invalid geometry
-        
-        if new_polygon.is_valid:
-            territories[territory_name] = new_polygon
-            st.success(f"Successfully adjusted coordinates for '{territory_name}'")
-            return territories, True
-        else:
-            st.error(f"Failed to create valid polygon after coordinate adjustment for '{territory_name}'")
-            return territories, False
-    except Exception as e:
-        st.error(f"Error fixing polygon coordinates: {str(e)}")
-        return territories, False
-
-def debug_problematic_addresses(territories, addresses, buffer_distance=1e-6):
-    """
-    Debug specific problematic addresses to see why they don't match any territory
-    """
-    st.subheader("Debugging Problematic Addresses")
-    
-    matched_addresses = []
-    unmatched_addresses = []
-    
-    # Check each address
-    for address in addresses:
-        lat = address["lat"]
-        lng = address["lng"]
-        name = address["name"]
-        
-        point = Point(lng, lat)
-        matched = False
-        
-        # Check all territories
-        for territory_name, polygon in territories.items():
-            try:
-                if contains_with_buffer(polygon, point, buffer_distance):
-                    matched_addresses.append({
-                        "address": address,
-                        "territory": territory_name
-                    })
-                    matched = True
-                    break
-            except Exception as e:
-                st.error(f"Error checking {name} with {territory_name}: {str(e)}")
-        
-        # If not matched to any territory
-        if not matched:
-            unmatched_addresses.append(address)
-    
-    # Display results
-    st.write(f"Checked {len(addresses)} addresses with buffer distance {buffer_distance}:")
-    st.write(f"• {len(matched_addresses)} addresses matched to a territory")
-    st.write(f"• {len(unmatched_addresses)} addresses did not match any territory")
-    
-    # Show unmatched addresses
-    if unmatched_addresses:
-        st.subheader("Unmatched Addresses")
-        
-        # Find closest territory for each unmatched address
-        for address in unmatched_addresses:
-            point = Point(address["lng"], address["lat"])
-            closest_territory = None
-            closest_distance = float('inf')
-            
-            for territory_name, polygon in territories.items():
-                try:
-                    distance = polygon.distance(point)
-                    if distance < closest_distance:
-                        closest_distance = distance
-                        closest_territory = territory_name
-                except Exception:
-                    pass
-            
-            st.write(f"**{address['name']}** ({address['lat']}, {address['lng']})")
-            if closest_territory:
-                st.write(f"• Closest territory: {closest_territory}")
-                st.write(f"• Distance: {closest_distance*111000:.2f} meters")
-            else:
-                st.write("• Could not determine closest territory")
-            
-            # Test with different buffer distances
-            st.write("• Testing with larger buffer distances:")
-            for buffer in [1e-5, 1e-4, 1e-3, 1e-2]:
-                matched_territory = None
-                for territory_name, polygon in territories.items():
-                    try:
-                        if contains_with_buffer(polygon, point, buffer):
-                            matched_territory = territory_name
-                            break
-                    except Exception:
-                        pass
-                
-                result = f"✅ Matches with {matched_territory}" if matched_territory else "❌ No match"
-                st.write(f"  Buffer {buffer}: {result}")
-            
-            st.write("---")
-    
-    # Visualize unmatched addresses
-    if unmatched_addresses:
-        st.subheader("Visualization of Unmatched Addresses")
-        
-        # Convert all territories to GeoJSON
-        all_territories_geojson = {
-            "type": "FeatureCollection",
-            "features": [
-                {
-                    "type": "Feature",
-                    "properties": {"name": name},
-                    "geometry": mapping(polygon)
-                } for name, polygon in territories.items()
-            ]
-        }
-        
-        # Convert unmatched addresses to GeoJSON
-        points_geojson = {
-            "type": "FeatureCollection",
-            "features": [
-                {
-                    "type": "Feature",
-                    "properties": {"name": addr["name"]},
-                    "geometry": {
-                        "type": "Point",
-                        "coordinates": [addr["lng"], addr["lat"]]
-                    }
-                } for addr in unmatched_addresses
-            ]
-        }
-        
-        # Create map centered on unmatched addresses
-        center_lat = sum(addr["lat"] for addr in unmatched_addresses) / len(unmatched_addresses)
-        center_lng = sum(addr["lng"] for addr in unmatched_addresses) / len(unmatched_addresses)
-        
-        m_width = 700
-        m_height = 500
-        
-        components.html(
-            f"""
-            <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
-            <div id="unmatched_map" style="height: {m_height}px; width: {m_width}px;"></div>
-            <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
-            <script>
-                var map = L.map('unmatched_map').setView([{center_lat}, {center_lng}], 12);
-                
-                L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-                    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                }}).addTo(map);
-                
-                // Add all territories
-                var territories = {json.dumps(all_territories_geojson)};
-                
-                var territoryLayer = L.geoJSON(territories, {{
-                    style: function(feature) {{
-                        return {{
-                            color: "#FF0000",
-                            weight: 2,
-                            opacity: 0.5,
-                            fillOpacity: 0.2
-                        }};
-                    }},
-                    onEachFeature: function(feature, layer) {{
-                        if (feature.properties && feature.properties.name) {{
-                            layer.bindPopup(feature.properties.name);
-                        }}
-                    }}
-                }}).addTo(map);
-                
-                // Add unmatched points
-                var points = {json.dumps(points_geojson)};
-                
-                var pointsLayer = L.geoJSON(points, {{
-                    pointToLayer: function(feature, latlng) {{
-                        return L.circleMarker(latlng, {{
-                            radius: 8,
-                            fillColor: "#0000FF",
-                            color: "#000",
-                            weight: 1,
-                            opacity: 1,
-                            fillOpacity: 0.8
-                        }});
-                    }},
-                    onEachFeature: function(feature, layer) {{
-                        if (feature.properties && feature.properties.name) {{
-                            layer.bindPopup(feature.properties.name);
-                        }}
-                    }}
-                }}).addTo(map);
-                
-                // Fit map to include points
-                var bounds = pointsLayer.getBounds();
-                map.fitBounds(bounds);
-            </script>
-            """,
-            height=m_height,
-            width=m_width,
-        )
-    
-    return matched_addresses, unmatched_addresses
-
 def main():
     st.set_page_config(page_title="Territory Analyzer", page_icon="🗺️", layout="wide")
     
-    st.title("Territory Analyzer with Specific Debug for Перова Addresses")
+    st.title("Territory Analyzer with Duplicate Name Handling")
     st.markdown("---")
     
     # Embed the Google Map
@@ -745,124 +359,6 @@ def main():
                     
                     # Analyze territory names for potential issues
                     analyze_territory_names(territories)
-
-                    # Special debug section for Перова addresses and Гресь десн polygon
-                    with st.expander("Debug Specific Case: Перова addresses and Гресь десн polygon"):
-                        st.write("This section specifically debugs why addresses on Перова street aren't matching with the Гресь десн polygon")
-                        
-                        perovа_addresses = [
-                            {"name": "м. Київ, бульв. Перова, 15", "lat": 50.48234, "lng": 30.59336},
-                            {"name": "м. Київ, бульв. Перова, 20", "lat": 50.47779, "lng": 30.59606}
-                        ]
-                        
-                        # Try to find "Гресь десн" with exact match or similar
-                        target_polygon = "Гресь десн"
-                        if target_polygon not in territories:
-                            # Try to find a similar name
-                            similar_names = [name for name in territories.keys() if "гресь" in name.lower() and "десн" in name.lower()]
-                            if similar_names:
-                                st.info(f"Exact name 'Гресь десн' not found, but found similar names: {', '.join(similar_names)}")
-                                target_polygon = similar_names[0]  # Use the first similar name
-                            else:
-                                # Try just "десн"
-                                similar_names = [name for name in territories.keys() if "десн" in name.lower()]
-                                if similar_names:
-                                    st.info(f"Found names with 'десн': {', '.join(similar_names)}")
-                                    target_polygon = similar_names[0]
-                                else:
-                                    # Try just "гресь"
-                                    similar_names = [name for name in territories.keys() if "гресь" in name.lower()]
-                                    if similar_names:
-                                        st.info(f"Found names with 'гресь': {', '.join(similar_names)}")
-                                        target_polygon = similar_names[0]
-                        
-                        if target_polygon in territories:
-                            debug_specific_polygon(territories, target_polygon, perovа_addresses)
-                        else:
-                            st.error("Could not find 'Гресь десн' or any similar name in the territories")
-                            
-                            # Show all territory names for reference
-                            with st.expander("Show all territory names"):
-                                for name in sorted(territories.keys()):
-                                    st.write(f"• {name}")
-                    
-                    # Debug problematic addresses
-                    with st.expander("Debug All Problematic Addresses"):
-                        st.write("This section tests all problematic addresses against the territories")
-                        
-                        # List of problematic addresses
-                        problem_addresses = [
-                            {"name": "м. Київ, бульв. Перова, 15", "lat": 50.48234, "lng": 30.59336},
-                            {"name": "м. Київ, бульв. Перова, 20", "lat": 50.47779, "lng": 30.59606},
-                            {"name": "м. Київ , вул. Юності, 6а (літера А)", "lat": 50.46397, "lng": 30.61831},
-                            {"name": "м. Київ , шосе Харківське, 17 а, прим.101", "lat": 50.43375, "lng": 30.63452},
-                            {"name": "м. Київ, б-р Бучми Амвросія, 6а", "lat": 50.43183, "lng": 30.60336},
-                            {"name": "м. Київ, вул. Алма-Атинська, 39-3", "lat": 50.44334, "lng": 30.66523},
-                            {"name": "м. Київ, вул. Березнева, 12 А", "lat": 50.43195, "lng": 30.62288},
-                            {"name": "м. Київ, вул. Березняківська, 30-Б", "lat": 50.42758, "lng": 30.61138},
-                            {"name": "м. Київ, вул. Запорожця Петра, 26", "lat": 50.47898, "lng": 30.60603},
-                            {"name": "м. Київ, вул. Каховська, 56", "lat": 50.46196, "lng": 30.59185},
-                            {"name": "м. Київ, вул. Кибальчича Миколи, 11В", "lat": 50.49304, "lng": 30.59856},
-                            {"name": "м. Київ, вул. Миропільська, 1", "lat": 50.46269, "lng": 30.62768},
-                            {"name": "м. Київ, вул. Празька, 24", "lat": 50.43779, "lng": 30.64064},
-                            {"name": "м. Київ, набережна Русанівська, будинок 4", "lat": 50.44092, "lng": 30.59334},
-                            {"name": "м. Київ, просп. Соборності, 5", "lat": 50.44021, "lng": 30.62023}
-                        ]
-                        
-                        # Test with different buffer sizes
-                        buffer_options = [1e-10, 1e-8, 1e-6, 1e-5, 1e-4, 1e-3]
-                        selected_buffer = st.selectbox(
-                            "Select buffer distance for testing",
-                            options=buffer_options,
-                            index=buffer_options.index(1e-6),  # Default 1e-6
-                            format_func=lambda x: f"{x} (approx. {x*111000:.2f} meters)"
-                        )
-                        
-                        # Run the debug
-                        matched, unmatched = debug_problematic_addresses(territories, problem_addresses, selected_buffer)
-                        
-                        # Show coordinate adjustment options if there are unmatched addresses
-                        if unmatched:
-                            st.subheader("Coordinate Adjustment Options")
-                            st.write("If addresses aren't matching due to coordinate system differences, you can try applying an offset")
-                            
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                lng_offset = st.number_input("Longitude offset", value=0.0, step=0.0001, format="%.6f")
-                            with col2:
-                                lat_offset = st.number_input("Latitude offset", value=0.0, step=0.0001, format="%.6f")
-                            
-                            if st.button("Apply offset and test again"):
-                                # Create a copy of territories with adjusted coordinates
-                                adjusted_territories = {}
-                                for name, polygon in territories.items():
-                                    # Extract coordinates and apply offset
-                                    coords = list(polygon.exterior.coords)
-                                    new_coords = [(x + lng_offset, y + lat_offset) for x, y in coords]
-                                    
-                                    try:
-                                        new_polygon = Polygon(new_coords)
-                                        if not new_polygon.is_valid:
-                                            new_polygon = new_polygon.buffer(0)  # Try to fix invalid geometry
-                                        
-                                        if new_polygon.is_valid:
-                                            adjusted_territories[name] = new_polygon
-                                    except Exception as e:
-                                        st.error(f"Error adjusting polygon {name}: {str(e)}")
-                                
-                                if adjusted_territories:
-                                    st.success(f"Applied offset ({lng_offset}, {lat_offset}) to {len(adjusted_territories)} territories")
-                                    matched_adj, unmatched_adj = debug_problematic_addresses(
-                                        adjusted_territories, problem_addresses, selected_buffer
-                                    )
-                                    
-                                    # Compare results
-                                    if len(unmatched_adj) < len(unmatched):
-                                        st.success(f"✅ Improvement! Unmatched addresses reduced from {len(unmatched)} to {len(unmatched_adj)}")
-                                    elif len(unmatched_adj) > len(unmatched):
-                                        st.error(f"❌ Worse! Unmatched addresses increased from {len(unmatched)} to {len(unmatched_adj)}")
-                                    else:
-                                        st.warning(f"⚠️ No change in number of unmatched addresses ({len(unmatched)})")
                 else:
                     st.warning("No valid territories were extracted from the KML file")
         except Exception as e:
@@ -917,6 +413,10 @@ def main():
                                 if excel_name != kml_name:
                                     st.write(f"• Excel: **{excel_name}** → KML: **{kml_name}**")
             
+            # Skip preview of address points on map
+            
+            # Skip debug section for territory matching
+            
             # Add options for territory matching
             st.subheader("Territory Matching Options")
             
@@ -948,11 +448,9 @@ def main():
                         "Boundary tolerance (smaller = more precise)", 
                         min_value=1e-10, 
                         max_value=1e-4, 
-                        value=1e-5,  # Increased default from 1e-6 to 1e-5
+                        value=1e-6,  # Default value
                         format="%.10f"
                     )
-                    
-                    st.info(f"A buffer of {boundary_tolerance} is approximately {boundary_tolerance*111000:.2f} meters")
             
             # Add name matching options
             with st.expander("Advanced Territory Name Matching"):
@@ -1058,13 +556,12 @@ def main():
                             
                             # Record multi-match cases for analysis
                             if len(matched_territories) > 1:
-                                address_info = {
-                                    'address': row.get('Address new', row.get('address', "Unknown")),
+                                multi_match_cases.append({
+                                    'address': row.get('Address new', "Unknown"),
                                     'lat': lat,
                                     'lng': lng,
                                     'territories': matched_territories
-                                }
-                                multi_match_cases.append(address_info)
+                                })
                             
                             # If we found any territories, determine which one to use
                             if matched_territories:
@@ -1084,12 +581,11 @@ def main():
                                 
                                 # Store information about unmatched address for debugging
                                 if len(unmatched_addresses) < 100:  # Limit to 100 examples
-                                    address_info = {
-                                        'address': row.get('Address new', row.get('address', "Unknown")),
+                                    unmatched_addresses.append({
+                                        'address': row.get('Address new', "Unknown"),
                                         'lat': lat,
                                         'lng': lng
-                                    }
-                                    unmatched_addresses.append(address_info)
+                                    })
                         else:
                             matched_territory = None
                             territory_match_count["Outside territory"] += 1
@@ -1158,24 +654,6 @@ def main():
                                         if count == 0 and name != "Outside territory" and name != "Preserved original"]
                     if empty_territories:
                         st.warning(f"Territories with no matching addresses: {', '.join(empty_territories)}")
-                
-                    # Show information about unmatched addresses
-                    if unmatched_addresses:
-                        with st.expander(f"Unmatched Addresses (Sample of {len(unmatched_addresses)})"):
-                            st.write(f"Total unmatched addresses: {territory_match_count['Outside territory']}")
-                            
-                            # Create a button to debug these unmatched addresses
-                            if st.button("Debug Unmatched Addresses"):
-                                problem_addresses = [
-                                    {
-                                        "name": addr["address"],
-                                        "lat": addr["lat"],
-                                        "lng": addr["lng"]
-                                    } for addr in unmatched_addresses
-                                ]
-                                
-                                # Run detailed debug on these addresses
-                                debug_problematic_addresses(territories, problem_addresses, boundary_tolerance)
         
         except Exception as e:
             st.error(f"Error processing the Excel file: {str(e)}")
