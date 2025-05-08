@@ -12,10 +12,12 @@ from io import BytesIO
 import json
 import math
 import difflib
+import unicodedata
 
 def extract_coordinates_from_kml(kml_content):
     """
-    Extract polygon coordinates from KML content with improved error handling and debugging
+    Extract polygon coordinates from KML content with improved error handling 
+    and duplicate territory name handling
     """
     # Parse the KML content
     try:
@@ -30,18 +32,65 @@ def extract_coordinates_from_kml(kml_content):
     # Dictionary to store territory polygons
     territories = {}
     
+    # Dictionary to track duplicate territory names
+    duplicate_counts = {}
+    
     # Find all Placemark elements
     placemarks = root.findall('.//kml:Placemark', ns)
     
     total_polygons = 0
     valid_polygons = 0
+    duplicate_territories = 0
     st.info(f"Found {len(placemarks)} placemarks in KML file")
     
+    # First, do a scan of all territory names to identify duplicates and prepare for debugging
+    all_territory_names = []
+    for placemark in placemarks:
+        name_elem = placemark.find('kml:name', ns)
+        if name_elem is not None:
+            raw_name = name_elem.text
+            all_territory_names.append(raw_name)
+    
+    # Find and report duplicates
+    name_counts = {}
+    for name in all_territory_names:
+        name_counts[name] = name_counts.get(name, 0) + 1
+    
+    duplicate_names = [name for name, count in name_counts.items() if count > 1]
+    if duplicate_names:
+        st.warning(f"Found {len(duplicate_names)} duplicate territory names in KML file:")
+        for i, name in enumerate(duplicate_names[:10]):  # Show first 10 to avoid cluttering the UI
+            st.warning(f"{i+1}. '{name}' appears {name_counts[name]} times")
+        if len(duplicate_names) > 10:
+            st.warning(f"...and {len(duplicate_names) - 10} more duplicate names")
+    
+    # Process each Placemark
     for placemark in placemarks:
         # Get the name of the territory
         name_elem = placemark.find('kml:name', ns)
         if name_elem is not None:
-            territory_name = name_elem.text.strip()
+            original_name = name_elem.text.strip()
+            territory_name = original_name
+            
+            # Check for duplicate name and make it unique if necessary
+            if territory_name in territories:
+                # Count this duplicate
+                duplicate_counts[territory_name] = duplicate_counts.get(territory_name, 1) + 1
+                counter = duplicate_counts[territory_name]
+                
+                # Create a unique name by adding a suffix
+                unique_name = f"{territory_name} #{counter}"
+                
+                st.warning(f"Duplicate territory name detected: '{territory_name}'. Renamed to '{unique_name}'")
+                territory_name = unique_name
+                duplicate_territories += 1
+            
+            # Debug info to detect invisible characters
+            clean_name = unicodedata.normalize('NFKC', territory_name)
+            if clean_name != territory_name:
+                st.warning(f"Normalized territory name: '{territory_name}' → '{clean_name}'")
+                # Use the normalized name
+                territory_name = clean_name
         else:
             continue  # Skip if no name found
         
@@ -62,7 +111,12 @@ def extract_coordinates_from_kml(kml_content):
                         if len(parts) >= 2:
                             try:
                                 lng, lat = float(parts[0]), float(parts[1])
-                                coord_pairs.append((lng, lat))
+                                # Verify coordinates are in expected range for Kyiv
+                                if 30.0 <= lng <= 31.0 and 50.0 <= lat <= 51.0:
+                                    coord_pairs.append((lng, lat))
+                                else:
+                                    st.warning(f"Coordinate outside expected range for Kyiv: ({lng}, {lat}) in {territory_name}")
+                                    coord_pairs.append((lng, lat))  # Still add it but warn
                             except ValueError:
                                 continue  # Skip invalid coordinates
                 
@@ -91,13 +145,17 @@ def extract_coordinates_from_kml(kml_content):
             except Exception as e:
                 st.warning(f"Error processing coordinates for {territory_name}: {str(e)}")
     
+    if duplicate_territories > 0:
+        st.warning(f"Renamed {duplicate_territories} territories to ensure unique names")
+    
     st.info(f"Successfully loaded {valid_polygons} valid polygons out of {total_polygons} total")
     return territories
 
-def contains_with_buffer(polygon, point, buffer_distance=1e-10):
+def contains_with_buffer(polygon, point, buffer_distance=1e-6):
     """
     Check if a point is within a polygon with a small buffer to handle edge cases.
     This is more robust for points that are exactly on the boundary.
+    Default buffer increased from 1e-10 to 1e-6 for better handling of edge cases.
     """
     try:
         # First check direct containment
@@ -115,14 +173,18 @@ def contains_with_buffer(polygon, point, buffer_distance=1e-10):
 def normalize_territory_name(name):
     """
     Normalize territory name to handle different formats and encodings
+    Enhanced to handle more cases of invisible characters and Unicode variants
     """
     if not name:
         return ""
     
-    # Convert to lowercase and remove spaces
-    normalized = name.lower().strip()
+    # Normalize Unicode characters (e.g., different forms of the same character)
+    name = unicodedata.normalize('NFKC', name)
     
-    # Remove any non-alphanumeric characters except numbers
+    # Convert to lowercase and remove all whitespace (not just trim)
+    normalized = re.sub(r'\s+', ' ', name.lower()).strip()
+    
+    # Remove any non-alphanumeric characters except numbers and spaces
     normalized = re.sub(r'[^\w\d\s]', '', normalized, flags=re.UNICODE)
     
     return normalized
@@ -130,6 +192,7 @@ def normalize_territory_name(name):
 def find_best_territory_match(territory_name, available_territories):
     """
     Find the best match for a territory name from available territories
+    Enhanced to handle more sophisticated matching
     """
     # If exact match exists, return it
     if territory_name in available_territories:
@@ -145,12 +208,23 @@ def find_best_territory_match(territory_name, available_territories):
     if normalized_name in normalized_map:
         return normalized_map[normalized_name]
     
-    # Try fuzzy matching
+    # Try fuzzy matching with a higher threshold
     best_matches = difflib.get_close_matches(
         normalized_name, 
         normalized_map.keys(),
         n=1,  # Return only the best match
-        cutoff=0.6  # Adjust this threshold for match quality (0.0-1.0)
+        cutoff=0.7  # Increased threshold for better match quality (0.0-1.0)
+    )
+    
+    if best_matches:
+        return normalized_map[best_matches[0]]
+    
+    # Try a more lenient fuzzy match if no match is found
+    best_matches = difflib.get_close_matches(
+        normalized_name, 
+        normalized_map.keys(),
+        n=1,  # Return only the best match
+        cutoff=0.6  # Lower threshold as a fallback
     )
     
     if best_matches:
@@ -176,6 +250,39 @@ def get_territory_name_mapping(kml_territories, excel_territories):
                 mapping[excel_territory] = match
     
     return mapping
+
+def debug_territory_matching(territories, lat, lng):
+    """
+    Helper function to debug if a point falls within any territory
+    """
+    point = Point(lng, lat)
+    matches = []
+    
+    for name, polygon in territories.items():
+        try:
+            if contains_with_buffer(polygon, point):
+                matches.append(name)
+        except Exception as e:
+            st.error(f"Error checking {name}: {str(e)}")
+    
+    if matches:
+        st.success(f"Point ({lat}, {lng}) falls within territories: {', '.join(matches)}")
+    else:
+        st.warning(f"Point ({lat}, {lng}) does not fall within any territory")
+        
+    # Debug visualization of the point
+    st.write(f"Point coordinates: {point.wkt}")
+    
+    # For any territory that's close but not containing the point, show the distance
+    st.write("Distance to territory boundaries:")
+    for name, polygon in territories.items():
+        try:
+            distance = point.distance(polygon.boundary)
+            st.write(f"• {name}: {distance:.8f} degrees")
+        except Exception as e:
+            st.write(f"• {name}: Error calculating distance - {str(e)}")
+    
+    return matches
 
 def export_territories_geojson(territories):
     """
@@ -227,10 +334,223 @@ def preview_address_points(df, lat_column, lng_column, max_points=100):
     
     return json.dumps(geojson)
 
+def visualize_problem_territories(territories, problem_territories, df, lat_column, lng_column):
+    """
+    Create a visualization of problem territories and nearby points
+    """
+    if not problem_territories:
+        st.warning("No problem territories specified for visualization")
+        return
+    
+    st.subheader("Problem Territories Visualization")
+    
+    # Filter territories to only include problem territories
+    filtered_territories = {name: polygon for name, polygon in territories.items() 
+                           if any(problem_name in name for problem_name in problem_territories)}
+    
+    if not filtered_territories:
+        st.warning("None of the specified problem territories found in the KML file")
+        return
+    
+    # Get the bounds of these territories
+    min_lng, min_lat, max_lng, max_lat = float('inf'), float('inf'), float('-inf'), float('-inf')
+    for polygon in filtered_territories.values():
+        bounds = polygon.bounds
+        min_lng = min(min_lng, bounds[0])
+        min_lat = min(min_lat, bounds[1])
+        max_lng = max(max_lng, bounds[2])
+        max_lat = max(max_lat, bounds[3])
+    
+    # Add some padding
+    padding = 0.01  # About 1km
+    min_lng -= padding
+    min_lat -= padding
+    max_lng += padding
+    max_lat += padding
+    
+    # Find all addresses within or near these problem territories
+    nearby_points = []
+    for _, row in df.iterrows():
+        lat = row[lat_column]
+        lng = row[lng_column]
+        if pd.notnull(lat) and pd.notnull(lng):
+            if min_lng <= lng <= max_lng and min_lat <= lat <= max_lat:
+                nearby_points.append({
+                    "lat": lat,
+                    "lng": lng,
+                    "address": row.get("Address new", "Unknown")
+                })
+    
+    # Generate GeoJSON for problem territories
+    territory_geojson = export_territories_geojson(filtered_territories)
+    
+    # Generate GeoJSON for nearby points
+    point_features = []
+    for point in nearby_points:
+        feature = {
+            "type": "Feature",
+            "properties": {"address": point["address"]},
+            "geometry": {
+                "type": "Point",
+                "coordinates": [float(point["lng"]), float(point["lat"])]
+            }
+        }
+        point_features.append(feature)
+    
+    points_geojson = json.dumps({
+        "type": "FeatureCollection",
+        "features": point_features
+    })
+    
+    # Show statistics
+    st.write(f"Visualizing {len(filtered_territories)} problem territories")
+    st.write(f"Found {len(nearby_points)} address points in or near these territories")
+    
+    # Create the visualization
+    m_width = 700
+    m_height = 500
+    
+    components.html(
+        f"""
+        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+        <div id="problem_map" style="height: {m_height}px; width: {m_width}px;"></div>
+        <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+        <script>
+            var map = L.map('problem_map').setView([{(min_lat + max_lat) / 2}, {(min_lng + max_lng) / 2}], 13);
+            
+            L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            }}).addTo(map);
+            
+            // Add the problem territories with different colors
+            var territoriesGeojson = {territory_geojson};
+            
+            function getRandomColor() {{
+                var letters = '0123456789ABCDEF';
+                var color = '#';
+                for (var i = 0; i < 6; i++) {{
+                    color += letters[Math.floor(Math.random() * 16)];
+                }}
+                return color;
+            }}
+            
+            L.geoJSON(territoriesGeojson, {{
+                style: function(feature) {{
+                    return {{
+                        color: getRandomColor(),
+                        weight: 3,
+                        opacity: 0.7,
+                        fillOpacity: 0.4
+                    }};
+                }},
+                onEachFeature: function(feature, layer) {{
+                    if (feature.properties && feature.properties.name) {{
+                        layer.bindPopup(feature.properties.name);
+                    }}
+                }}
+            }}).addTo(map);
+            
+            // Add the nearby points
+            var pointsGeojson = {points_geojson};
+            
+            L.geoJSON(pointsGeojson, {{
+                pointToLayer: function(feature, latlng) {{
+                    return L.circleMarker(latlng, {{
+                        radius: 5,
+                        fillColor: "#ff0000",
+                        color: "#000",
+                        weight: 1,
+                        opacity: 1,
+                        fillOpacity: 0.8
+                    }});
+                }},
+                onEachFeature: function(feature, layer) {{
+                    if (feature.properties && feature.properties.address) {{
+                        layer.bindPopup(feature.properties.address);
+                    }}
+                }}
+            }}).addTo(map);
+            
+            // Fit map to bounds
+            map.fitBounds([
+                [{min_lat}, {min_lng}],
+                [{max_lat}, {max_lng}]
+            ]);
+        </script>
+        """,
+        height=m_height,
+        width=m_width,
+    )
+    
+    # Add instructions for interpreting the map
+    st.write("**How to interpret this map:**")
+    st.write("• Each colored polygon represents one of the problem territories")
+    st.write("• Red dots represent address points in or near these territories")
+    st.write("• Click on a polygon or point to see its name/address")
+    st.write("• Addresses that appear within a polygon but are not being assigned may have coordinate issues")
+
+def analyze_territory_names(territories):
+    """
+    Analyze territory names for potential issues
+    """
+    st.subheader("Territory Name Analysis")
+    
+    # Check for names that differ only in whitespace or case
+    normalized_map = {}
+    potential_conflicts = []
+    
+    for name in territories.keys():
+        # Simple normalization (lowercase, remove whitespace)
+        simple_norm = re.sub(r'\s+', '', name.lower())
+        
+        if simple_norm in normalized_map:
+            existing_name = normalized_map[simple_norm]
+            potential_conflicts.append((existing_name, name))
+        else:
+            normalized_map[simple_norm] = name
+    
+    if potential_conflicts:
+        st.warning("Found territory names that differ only in case or whitespace:")
+        for original, similar in potential_conflicts:
+            st.write(f"• '{original}' vs '{similar}'")
+            
+            # Show exact byte representation for debugging
+            st.write(f"  - '{original}': {[ord(c) for c in original]}")
+            st.write(f"  - '{similar}': {[ord(c) for c in similar]}")
+    else:
+        st.success("No territory names with whitespace or case conflicts found")
+    
+    # Look for name patterns in problem territories
+    problem_territories = ["Павленко-Соболєв Є.Г.", "Лихачева А 3", "Гресь 3", "Шелухін 8", "Гресь 4"]
+    
+    st.write("Checking for problem territory name patterns:")
+    for problem in problem_territories:
+        found = False
+        exact_match = problem in territories
+        
+        if exact_match:
+            st.success(f"• '{problem}' - Exact match found in KML territories")
+            found = True
+        else:
+            # Look for similar names
+            matches = []
+            for name in territories.keys():
+                # Check if it contains the base part of the problem name
+                base_name = re.sub(r'\d+', '', problem).strip()
+                if base_name in name:
+                    matches.append(name)
+            
+            if matches:
+                st.warning(f"• '{problem}' - No exact match, but found similar names: {', '.join(matches)}")
+                found = True
+        
+        if not found:
+            st.error(f"• '{problem}' - No match or similar name found in KML territories")
+
 def main():
     st.set_page_config(page_title="Territory Analyzer", page_icon="🗺️", layout="wide")
     
-    st.title("Territory Analyzer")
+    st.title("Territory Analyzer with Duplicate Name Handling")
     st.markdown("---")
     
     # Embed the Google Map
@@ -279,6 +599,9 @@ def main():
                 # Display the territory names
                 if territories:
                     st.success(f"Successfully loaded {len(territories)} territories from {kml_file.name}!")
+                    
+                    # Analyze territory names for potential issues
+                    analyze_territory_names(territories)
                 else:
                     st.warning("No valid territories were extracted from the KML file")
         except Exception as e:
@@ -388,6 +711,16 @@ def main():
                 else:
                     st.warning("No valid coordinates found in the data")
             
+            # Add debug section for testing coordinates
+            with st.expander("Debug Territory Matching"):
+                st.write("Use this tool to check if specific coordinates fall within any territory")
+                test_lat = st.number_input("Test Latitude", value=50.5126704)
+                test_lng = st.number_input("Test Longitude", value=30.4267758)
+                debug_button = st.button("Test These Coordinates")
+
+                if debug_button and territories:
+                    debug_territory_matching(territories, test_lat, test_lng)
+            
             # Add options for territory matching
             st.subheader("Territory Matching Options")
             
@@ -409,7 +742,7 @@ def main():
                     priority_territory = st.selectbox(
                         "Select territory to prioritize",
                         options=all_territories,
-                        index=all_territories.index(default_priority) if default_priority in all_territories else 0
+                        index=all_territories.index(default_priority) if default_priority in all_territories and len(all_territories) > 0 else 0
                     )
             
             with col2:
@@ -418,8 +751,8 @@ def main():
                     boundary_tolerance = st.number_input(
                         "Boundary tolerance (smaller = more precise)", 
                         min_value=1e-10, 
-                        max_value=1e-5, 
-                        value=1e-8,
+                        max_value=1e-4, 
+                        value=1e-6,  # Default value
                         format="%.10f"
                     )
             
@@ -428,25 +761,8 @@ def main():
                 use_name_mapping = st.checkbox("Use territory name mapping", value=True)
                 st.info("This option will map territory names in the Excel file to the closest matching territory names in the KML file")
                 
-                if 'territory' in df.columns and use_name_mapping:
-                    # Build and show the territory name mapping
-                    excel_territories = set(df['territory'].dropna().unique())
-                    kml_territories = set(territories.keys())
-                    
-                    # Create mapping
-                    territory_mapping = {}
-                    for excel_name in excel_territories:
-                        if excel_name in kml_territories:
-                            territory_mapping[excel_name] = excel_name
-                        else:
-                            match = find_best_territory_match(excel_name, kml_territories)
-                            if match:
-                                territory_mapping[excel_name] = match
-                    
-                    st.write("Territory name mapping:")
-                    for excel_name, kml_name in territory_mapping.items():
-                        if excel_name != kml_name:
-                            st.write(f"• Excel: **{excel_name}** → KML: **{kml_name}**")
+                fuzzy_matching = st.checkbox("Use fuzzy name matching for similar territory names", value=True)
+                st.info("This option will try to match similar territory names even if they have slight differences in spelling")
                 
                 # Option to preserve existing territories
                 preserve_existing = st.checkbox("Preserve existing territory assignments", value=True)
@@ -478,9 +794,10 @@ def main():
                             if excel_name in kml_territories:
                                 territory_mapping[excel_name] = excel_name
                             else:
-                                match = find_best_territory_match(excel_name, kml_territories)
-                                if match:
-                                    territory_mapping[excel_name] = match
+                                if fuzzy_matching:
+                                    match = find_best_territory_match(excel_name, kml_territories)
+                                    if match:
+                                        territory_mapping[excel_name] = match
                     
                     # Determine territory for each point
                     territory_results = []
@@ -544,7 +861,7 @@ def main():
                             # Record multi-match cases for analysis
                             if len(matched_territories) > 1:
                                 multi_match_cases.append({
-                                    'address': row.get('Address new', 'Unknown'),
+                                    'address': row.get('Address new', "Unknown"),
                                     'lat': lat,
                                     'lng': lng,
                                     'territories': matched_territories
@@ -569,7 +886,7 @@ def main():
                                 # Store information about unmatched address for debugging
                                 if len(unmatched_addresses) < 100:  # Limit to 100 examples
                                     unmatched_addresses.append({
-                                        'address': row.get('Address new', 'Unknown'),
+                                        'address': row.get('Address new', "Unknown"),
                                         'lat': lat,
                                         'lng': lng
                                     })
@@ -641,6 +958,47 @@ def main():
                                         if count == 0 and name != "Outside territory" and name != "Preserved original"]
                     if empty_territories:
                         st.warning(f"Territories with no matching addresses: {', '.join(empty_territories)}")
+                        
+                        with st.expander("Details on territories with no matches"):
+                            for name in empty_territories:
+                                if name in territories:
+                                    polygon = territories[name]
+                                    bounds = polygon.bounds
+                                    area = polygon.area
+                                    center = polygon.centroid
+                                    
+                                    st.write(f"**{name}**:")
+                                    st.write(f"• Bounds: min_lng={bounds[0]:.6f}, min_lat={bounds[1]:.6f}, max_lng={bounds[2]:.6f}, max_lat={bounds[3]:.6f}")
+                                    st.write(f"• Center: lat={center.y:.6f}, lng={center.x:.6f}")
+                                    st.write(f"• Area: {area:.8f} sq degrees (approximately {area * 111**2:.2f} sq km)")
+                                    
+                                    # Try to find nearby addresses
+                                    nearby_count = 0
+                                    closest_distance = float('inf')
+                                    closest_address = None
+                                    
+                                    for _, row in df.iterrows():
+                                        lat = row[lat_column]
+                                        lng = row[lng_column]
+                                        if pd.notnull(lat) and pd.notnull(lng):
+                                            point = Point(lng, lat)
+                                            try:
+                                                distance = polygon.boundary.distance(point)
+                                                
+                                                # Less than 1km
+                                                if distance < 0.01:
+                                                    nearby_count += 1
+                                                
+                                                # Track closest address
+                                                if distance < closest_distance:
+                                                    closest_distance = distance
+                                                    closest_address = row.get('Address new', "Unknown")
+                                            except:
+                                                pass
+                                    
+                                    st.write(f"• Addresses within 1km: {nearby_count}")
+                                    if closest_address:
+                                        st.write(f"• Closest address: {closest_address} (distance: {closest_distance*111:.2f} km)")
                     
                     # Show information about unmatched addresses
                     if unmatched_addresses:
