@@ -177,39 +177,6 @@ def get_territory_name_mapping(kml_territories, excel_territories):
     
     return mapping
 
-def debug_territory_matching(territories, lat, lng):
-    """
-    Helper function to debug if a point falls within any territory
-    """
-    point = Point(lng, lat)
-    matches = []
-    
-    for name, polygon in territories.items():
-        try:
-            if contains_with_buffer(polygon, point):
-                matches.append(name)
-        except Exception as e:
-            st.error(f"Error checking {name}: {str(e)}")
-    
-    if matches:
-        st.success(f"Point ({lat}, {lng}) falls within territories: {', '.join(matches)}")
-    else:
-        st.warning(f"Point ({lat}, {lng}) does not fall within any territory")
-        
-    # Debug visualization of the point
-    st.write(f"Point coordinates: {point.wkt}")
-    
-    # For any territory that's close but not containing the point, show the distance
-    st.write("Distance to territory boundaries:")
-    for name, polygon in territories.items():
-        try:
-            distance = point.distance(polygon.boundary)
-            st.write(f"• {name}: {distance:.8f} degrees")
-        except Exception as e:
-            st.write(f"• {name}: Error calculating distance - {str(e)}")
-    
-    return matches
-
 def export_territories_geojson(territories):
     """
     Export territories as GeoJSON for visualization
@@ -312,73 +279,6 @@ def main():
                 # Display the territory names
                 if territories:
                     st.success(f"Successfully loaded {len(territories)} territories from {kml_file.name}!")
-                    
-                    # Create expandable sections for territories
-                    with st.expander("View loaded territories"):
-                        for name in sorted(territories.keys()):
-                            polygon = territories[name]
-                            bounds = polygon.bounds
-                            st.write(f"• **{name}**: Bounds (min_lng={bounds[0]:.6f}, min_lat={bounds[1]:.6f}, max_lng={bounds[2]:.6f}, max_lat={bounds[3]:.6f})")
-                    
-                    # Add territory visualization option
-                    if st.checkbox("Visualize territories (may be slow for many territories)"):
-                        geojson_str = export_territories_geojson(territories)
-                        m_width = 700
-                        m_height = 500
-                        
-                        # Use Leaflet to visualize
-                        components.html(
-                            f"""
-                            <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
-                            <div id="map" style="height: {m_height}px; width: {m_width}px;"></div>
-                            <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
-                            <script>
-                                var map = L.map('map').setView([50.45, 30.52], 10); // Centered on Kyiv
-                                
-                                L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-                                    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                                }}).addTo(map);
-                                
-                                var geojson = {geojson_str};
-                                
-                                function getRandomColor() {{
-                                    var letters = '0123456789ABCDEF';
-                                    var color = '#';
-                                    for (var i = 0; i < 6; i++) {{
-                                        color += letters[Math.floor(Math.random() * 16)];
-                                    }}
-                                    return color;
-                                }}
-                                
-                                L.geoJSON(geojson, {{
-                                    style: function(feature) {{
-                                        return {{
-                                            color: getRandomColor(),
-                                            weight: 2,
-                                            opacity: 0.7,
-                                            fillOpacity: 0.3
-                                        }};
-                                    }},
-                                    onEachFeature: function(feature, layer) {{
-                                        if (feature.properties && feature.properties.name) {{
-                                            layer.bindPopup(feature.properties.name);
-                                        }}
-                                    }}
-                                }}).addTo(map);
-                                
-                                // Fit map to data bounds
-                                var bounds = L.geoJSON(geojson).getBounds();
-                                if (!bounds.isValid()) {{
-                                    // Default to Kyiv if bounds are invalid
-                                    map.setView([50.45, 30.52], 10);
-                                }} else {{
-                                    map.fitBounds(bounds);
-                                }}
-                            </script>
-                            """,
-                            height=m_height,
-                            width=m_width,
-                        )
                 else:
                     st.warning("No valid territories were extracted from the KML file")
         except Exception as e:
@@ -487,16 +387,6 @@ def main():
                     )
                 else:
                     st.warning("No valid coordinates found in the data")
-            
-            # Add debug section for testing specific coordinates
-            with st.expander("Debug Territory Matching"):
-                st.write("Use this tool to check if specific coordinates fall within any territory")
-                test_lat = st.number_input("Test Latitude", value=50.5126704)
-                test_lng = st.number_input("Test Longitude", value=30.4267758)
-                debug_button = st.button("Test These Coordinates")
-
-                if debug_button and territories:
-                    debug_territory_matching(territories, test_lat, test_lng)
             
             # Add options for territory matching
             st.subheader("Territory Matching Options")
@@ -825,9 +715,6 @@ def main():
                                     height=m_height,
                                     width=m_width,
                                 )
-                            
-                            # Suggest checking these coordinates against the territories
-                            st.write("\nTo check if a specific point is within any territory, use the Debug Territory Matching tool")
         
         except Exception as e:
             st.error(f"Error processing the Excel file: {str(e)}")
